@@ -13,9 +13,10 @@ CORS(app)
 # =========================
 # CONFIGURATION
 # =========================
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-MODEL_URL = os.getenv("MODEL_URL")  # HF Docker Space endpoint
+SUPABASE_URL = os.getenv("https://kocncqnksuumkeuypxim.supabase.co")
+SUPABASE_SERVICE_KEY = os.getenv("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtvY25jcW5rc3V1bWtldXlweGltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjYxNTY5ODksImV4cCI6MjA4MTczMjk4OX0.o6pG0dpiQnY9112x2tu7ZtNVZYq49O5pGqceqWJQKMY")
+MODEL_URL = os.getenv("https://your-space-name.hf.space/predict
+")  # HF Docker Space endpoint
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not MODEL_URL:
     raise Exception("Missing required environment variables.")
