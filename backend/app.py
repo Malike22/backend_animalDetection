@@ -11,42 +11,37 @@ app = Flask(__name__)
 CORS(app)
 
 # =========================
-# CONFIGURATION
+# CONFIG
 # =========================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-MODEL_URL = os.getenv("MODEL_URL")
-
-
- 
+MODEL_URL = os.getenv("MODEL_URL")  # https://xxxx.hf.space/predict
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not MODEL_URL:
-    raise Exception("Missing required environment variables.")
+    raise Exception("Missing required environment variables")
 
-# Initialize Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-
 # =========================
-# SEND IMAGE TO DOCKER SPACE
+# MODEL CALL
 # =========================
 def query_model(image_url):
     try:
-        # 1️⃣ Download image from Supabase storage
-        image_response = requests.get(image_url)
+        print("Downloading image:", image_url)
+        image_response = requests.get(image_url, timeout=20)
+
         if image_response.status_code != 200:
             return None, f"Failed to download image: {image_response.status_code}"
 
-        # 2️⃣ Send as file (multipart/form-data)
         files = {
             "image": ("image.jpg", image_response.content, "image/jpeg")
         }
 
-        response = requests.post(
-            MODEL_URL,
-            files=files,
-            timeout=60
-        )
+        print("Sending to model:", MODEL_URL)
+        response = requests.post(MODEL_URL, files=files, timeout=60)
+
+        print("Model status:", response.status_code)
+        print("Model raw response:", response.text)
 
         if response.status_code != 200:
             return None, response.text
@@ -56,37 +51,36 @@ def query_model(image_url):
     except Exception as e:
         return None, str(e)
 
-
 # =========================
-# HEALTH CHECK
+# HEALTH
 # =========================
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "healthy"}), 200
 
-
 # =========================
-# WEBHOOK ENDPOINT
+# WEBHOOK
 # =========================
 @app.route("/webhook/process-image", methods=["POST"])
 def process_image():
-
-    data = request.json
-
-    image_url = data.get("image_url")
-    captured_image_id = data.get("captured_image_id")
-    user_id = data.get("user_id")
-
-    if not all([image_url, captured_image_id, user_id]):
-        return jsonify({"error": "Missing parameters"}), 400
-
     try:
-        # 1️⃣ Update status → processing
+        data = request.get_json(force=True)
+
+        image_url = data.get("image_url")
+        captured_image_id = data.get("captured_image_id")
+        user_id = data.get("user_id")
+
+        if not all([image_url, captured_image_id, user_id]):
+            return jsonify({"error": "Missing parameters"}), 400
+
+        print("Processing:", captured_image_id)
+
+        # Update → processing
         supabase.table("captured_images").update({
             "status": "processing"
         }).eq("id", captured_image_id).execute()
 
-        # 2️⃣ Call model
+        # Call model
         prediction, error = query_model(image_url)
 
         if error:
@@ -97,11 +91,11 @@ def process_image():
 
             return jsonify({"error": error}), 500
 
-        # 3️⃣ Parse prediction response
-        animal_name = prediction.get("label", "Unknown")
+        # Parse
+        animal_name = prediction.get("label", "unknown")
         confidence = float(prediction.get("confidence", 0)) * 100
 
-        # 4️⃣ Insert into labeled_images table
+        # Insert result
         supabase.table("labeled_images").insert({
             "captured_image_id": captured_image_id,
             "user_id": user_id,
@@ -110,7 +104,7 @@ def process_image():
             "confidence_score": confidence
         }).execute()
 
-        # 5️⃣ Update status → completed
+        # Update → completed
         supabase.table("captured_images").update({
             "status": "completed"
         }).eq("id", captured_image_id).execute()
@@ -122,16 +116,11 @@ def process_image():
         }), 200
 
     except Exception as e:
-        supabase.table("captured_images").update({
-            "status": "failed",
-            "metadata": {"error": str(e)}
-        }).eq("id", captured_image_id).execute()
-
+        print("FATAL ERROR:", str(e))
         return jsonify({"error": str(e)}), 500
 
-
 # =========================
-# RUN SERVER
+# RUN
 # =========================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
