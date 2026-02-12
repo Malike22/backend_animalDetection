@@ -15,7 +15,7 @@ CORS(app)
 # =========================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-MODEL_URL = os.getenv("MODEL_URL")  # https://xxxx.hf.space/predict
+MODEL_URL = os.getenv("MODEL_URL")  # Example: https://xxxx.hf.space/predict
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not MODEL_URL:
     raise Exception("Missing required environment variables")
@@ -26,33 +26,35 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 # MODEL CALL
 # =========================
 def query_model(image_url):
+    """
+    Downloads the image and sends it to the model URL.
+    Returns (prediction_dict, error_str)
+    """
     try:
         print("Downloading image:", image_url)
-        image_response = requests.get(image_url, timeout=20)
+        resp = requests.get(image_url, timeout=20)
+        resp.raise_for_status()
 
-        if image_response.status_code != 200:
-            return None, f"Failed to download image: {image_response.status_code}"
-
-        files = {
-            "image": ("image.jpg", image_response.content, "image/jpeg")
-        }
+        files = {"image": ("image.jpg", resp.content, "image/jpeg")}
 
         print("Sending to model:", MODEL_URL)
         response = requests.post(MODEL_URL, files=files, timeout=60)
+        response.raise_for_status()
 
-        print("Model status:", response.status_code)
-        print("Model raw response:", response.text)
+        try:
+            result = response.json()
+        except ValueError:
+            return None, f"Model returned invalid JSON: {response.text[:200]}"
 
-        if response.status_code != 200:
-            return None, response.text
+        return result, None
 
-        return response.json(), None
-
+    except requests.exceptions.RequestException as e:
+        return None, f"Request failed: {str(e)}"
     except Exception as e:
         return None, str(e)
 
 # =========================
-# HEALTH
+# HEALTH CHECK
 # =========================
 @app.route("/health", methods=["GET"])
 def health():
@@ -65,7 +67,6 @@ def health():
 def process_image():
     try:
         data = request.get_json(force=True)
-
         image_url = data.get("image_url")
         captured_image_id = data.get("captured_image_id")
         user_id = data.get("user_id")
@@ -73,7 +74,7 @@ def process_image():
         if not all([image_url, captured_image_id, user_id]):
             return jsonify({"error": "Missing parameters"}), 400
 
-        print("Processing:", captured_image_id)
+        print("Processing captured_image_id:", captured_image_id)
 
         # Update → processing
         supabase.table("captured_images").update({
@@ -82,18 +83,20 @@ def process_image():
 
         # Call model
         prediction, error = query_model(image_url)
-
         if error:
+            print("Model error:", error)
             supabase.table("captured_images").update({
                 "status": "failed",
-                "metadata": {"error": error}
+                "metadata": str(error)  # Safe if column is text
             }).eq("id", captured_image_id).execute()
-
             return jsonify({"error": error}), 500
 
-        # Parse
+        # Safe parsing
         animal_name = prediction.get("label", "unknown")
-        confidence = float(prediction.get("confidence", 0)) * 100
+        try:
+            confidence = float(prediction.get("confidence", 0)) * 100
+        except Exception:
+            confidence = 0
 
         # Insert result
         supabase.table("labeled_images").insert({
@@ -116,12 +119,16 @@ def process_image():
         }), 200
 
     except Exception as e:
+        # FATAL ERROR: log full stacktrace for debugging
+        import traceback
         print("FATAL ERROR:", str(e))
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 # =========================
-# RUN
+# RUN APP
 # =========================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
+    print(f"Starting Flask app on port {port}")
     app.run(host="0.0.0.0", port=port)
