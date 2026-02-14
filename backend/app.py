@@ -10,14 +10,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+
+# 🔥 CRITICAL CORS FIX
+CORS(app, supports_credentials=True)
 
 # =========================
 # CONFIG
 # =========================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-MODEL_URL = os.getenv("MODEL_URL")  # HF Docker Space endpoint
+MODEL_URL = os.getenv("MODEL_URL")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
@@ -25,11 +27,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 # BACKGROUND STORAGE TASK
 # =========================
 def background_storage(image_bytes, filename, mimetype, animal, confidence, user_id):
-
     try:
         bucket = "labeled-images"
 
-        # Upload image to Supabase Storage
         supabase.storage.from_(bucket).upload(
             filename,
             image_bytes,
@@ -38,7 +38,6 @@ def background_storage(image_bytes, filename, mimetype, animal, confidence, user
 
         public_url = supabase.storage.from_(bucket).get_public_url(filename)
 
-        # Insert record into database
         data = {
             "labeled_image_url": public_url,
             "animal_detected": animal,
@@ -55,10 +54,14 @@ def background_storage(image_bytes, filename, mimetype, animal, confidence, user
 
 
 # =========================
-# PREDICT ENDPOINT
+# 🔥 PREDICT ENDPOINT WITH OPTIONS HANDLING
 # =========================
-@app.route("/predict", methods=["POST"])
+@app.route("/predict", methods=["POST", "OPTIONS"])
 def predict():
+
+    # 🔥 Handle CORS preflight
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"}), 200
 
     if "image" not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
@@ -66,12 +69,9 @@ def predict():
     file = request.files["image"]
     image_bytes = file.read()
     mimetype = file.mimetype
-
-    # Optional user_id from frontend
     user_id = request.form.get("user_id")
 
     try:
-        # ===== SEND IMAGE TO HF DOCKER SPACE =====
         files = {"image": (file.filename, image_bytes, mimetype)}
 
         response = requests.post(
@@ -81,23 +81,19 @@ def predict():
         )
 
         response.raise_for_status()
-
         prediction = response.json()
 
         animal = prediction.get("label", "Unknown")
         confidence = float(prediction.get("confidence", 0)) * 100
 
-        # ===== START BACKGROUND STORAGE THREAD =====
         filename = f"{int(time.time())}_{file.filename}"
 
-        thread = threading.Thread(
+        threading.Thread(
             target=background_storage,
             args=(image_bytes, filename, mimetype, animal, confidence, user_id),
             daemon=True
-        )
-        thread.start()
+        ).start()
 
-        # ===== RETURN RESULT IMMEDIATELY =====
         return jsonify({
             "status": "success",
             "animal": animal,
