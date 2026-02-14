@@ -1,6 +1,5 @@
 import os
 import time
-import threading
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -29,44 +28,16 @@ if not MODEL_URL:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# =========================
-# BACKGROUND STORAGE TASK
-# =========================
-def background_storage(image_bytes, filename, mimetype, animal, confidence, user_id):
-    try:
-        bucket = "labeled-images"  # ⚠️ must exist in Supabase
-
-        # Upload image
-        supabase.storage.from_(bucket).upload(
-            filename,
-            image_bytes,
-            {"content-type": mimetype}
-        )
-
-        # Get public URL
-        public_url = supabase.storage.from_(bucket).get_public_url(filename)
-
-        # Insert record
-        supabase.table("labeled_images").insert({
-            "labeled_image_url": public_url,
-            "animal_detected": animal,
-            "confidence_score": confidence,
-            "user_id": user_id
-        }).execute()
-
-        print("✅ Stored detection:", animal)
-
-    except Exception as e:
-        print("❌ Background storage error:", e)
+BUCKET_NAME = "captured-images"  # MUST EXIST in Supabase
 
 
 # =========================
-# PREDICT ENDPOINT
+# PREDICT ENDPOINT (AI ONLY)
 # =========================
 @app.route("/predict", methods=["POST", "OPTIONS"])
 def predict():
 
-    # Handle CORS preflight
+    # 🔥 Handle CORS preflight
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"}), 200
 
@@ -76,14 +47,9 @@ def predict():
     file = request.files["image"]
     image_bytes = file.read()
     mimetype = file.mimetype
-    user_id = request.form.get("user_id")
-
-    # 🧠 SAFE FALLBACK if user_id missing
-    if not user_id:
-        user_id = "anonymous"
 
     try:
-        # Send image to HF Space
+        # Send image to HF Space model
         files = {"image": (file.filename, image_bytes, mimetype)}
 
         response = requests.post(
@@ -98,24 +64,79 @@ def predict():
         animal = prediction.get("label", "Unknown")
         confidence = float(prediction.get("confidence", 0)) * 100
 
-        # 🔥 FINAL FIX — STORE INSIDE USER FOLDER
-        filename = f"{user_id}/{int(time.time())}_{file.filename}"
-
-        threading.Thread(
-            target=background_storage,
-            args=(image_bytes, filename, mimetype, animal, confidence, user_id),
-            daemon=True
-        ).start()
-
         return jsonify({
             "status": "success",
             "animal": animal,
             "confidence": confidence
         }), 200
 
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"AI service error: {str(e)}"}), 500
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# =========================
+# SAVE HISTORY (UPLOAD + DB INSERT)
+# =========================
+@app.route("/save-history", methods=["POST"])
+def save_history():
+
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    file = request.files["image"]
+    animal = request.form.get("animal")
+    confidence = request.form.get("confidence")
+    user_id = request.form.get("user_id")
+
+    if not all([animal, confidence, user_id]):
+        return jsonify({"error": "Missing required data"}), 400
+
+    try:
+        image_bytes = file.read()
+        mimetype = file.mimetype
+        filename = f"{int(time.time())}_{file.filename}"
+
+        # ========= 1️⃣ Upload to Storage =========
+        supabase.storage.from_(BUCKET_NAME).upload(
+            filename,
+            image_bytes,
+            {"content-type": mimetype}
+        )
+
+        public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(filename)
+
+        # ========= 2️⃣ Insert into captured_images =========
+        captured_data = {
+            "user_id": user_id,
+            "image_url": public_url,
+            "status": "completed"
+        }
+
+        captured_response = supabase.table("captured_images").insert(captured_data).execute()
+
+        if not captured_response.data:
+            return jsonify({"error": "Failed to create captured image record"}), 500
+
+        captured_id = captured_response.data[0]["id"]
+
+        # ========= 3️⃣ Insert into labeled_images =========
+        label_data = {
+            "captured_image_id": captured_id,
+            "labeled_image_url": public_url,
+            "animal_detected": animal,
+            "confidence_score": float(confidence),
+            "user_id": user_id
+        }
+
+        supabase.table("labeled_images").insert(label_data).execute()
+
+        return jsonify({
+            "status": "saved",
+            "image_url": public_url
+        }), 200
+
+    except Exception as e:
+        print("Save history error:", e)
         return jsonify({"error": str(e)}), 500
 
 
