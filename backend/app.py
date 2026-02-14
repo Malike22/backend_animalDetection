@@ -1,4 +1,6 @@
 import os
+import time
+import threading
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -15,12 +17,96 @@ CORS(app)
 # =========================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-MODEL_URL = os.getenv("MODEL_URL")  # HF Space /predict endpoint
-
-if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not MODEL_URL:
-    raise Exception("Missing required environment variables")
+MODEL_URL = os.getenv("MODEL_URL")  # HF Docker Space endpoint
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+# =========================
+# BACKGROUND STORAGE TASK
+# =========================
+def background_storage(image_bytes, filename, mimetype, animal, confidence, user_id):
+
+    try:
+        bucket = "labeled-images"
+
+        # Upload image to Supabase Storage
+        supabase.storage.from_(bucket).upload(
+            filename,
+            image_bytes,
+            {"content-type": mimetype}
+        )
+
+        public_url = supabase.storage.from_(bucket).get_public_url(filename)
+
+        # Insert record into database
+        data = {
+            "labeled_image_url": public_url,
+            "animal_detected": animal,
+            "confidence_score": confidence,
+            "user_id": user_id
+        }
+
+        supabase.table("labeled_images").insert(data).execute()
+
+        print("Stored detection:", animal)
+
+    except Exception as e:
+        print("Background storage error:", e)
+
+
+# =========================
+# PREDICT ENDPOINT
+# =========================
+@app.route("/predict", methods=["POST"])
+def predict():
+
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    file = request.files["image"]
+    image_bytes = file.read()
+    mimetype = file.mimetype
+
+    # Optional user_id from frontend
+    user_id = request.form.get("user_id")
+
+    try:
+        # ===== SEND IMAGE TO HF DOCKER SPACE =====
+        files = {"image": (file.filename, image_bytes, mimetype)}
+
+        response = requests.post(
+            MODEL_URL,
+            files=files,
+            timeout=120
+        )
+
+        response.raise_for_status()
+
+        prediction = response.json()
+
+        animal = prediction.get("label", "Unknown")
+        confidence = float(prediction.get("confidence", 0)) * 100
+
+        # ===== START BACKGROUND STORAGE THREAD =====
+        filename = f"{int(time.time())}_{file.filename}"
+
+        thread = threading.Thread(
+            target=background_storage,
+            args=(image_bytes, filename, mimetype, animal, confidence, user_id),
+            daemon=True
+        )
+        thread.start()
+
+        # ===== RETURN RESULT IMMEDIATELY =====
+        return jsonify({
+            "status": "success",
+            "animal": animal,
+            "confidence": confidence
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 # =========================
 # HEALTH CHECK
@@ -31,88 +117,8 @@ def health():
 
 
 # =========================
-# PREDICT FIRST ENDPOINT
-# =========================
-@app.route("/predict", methods=["POST"])
-def predict():
-    try:
-        # Check file
-        if "image" not in request.files:
-            return jsonify({"error": "No image file uploaded"}), 400
-
-        file = request.files["image"]
-        image_bytes = file.read()
-
-        # =========================
-        # STEP 1 — SEND TO MODEL
-        # =========================
-        files = {"image": ("image.jpg", image_bytes, "image/jpeg")}
-
-        model_response = requests.post(
-            MODEL_URL,
-            files=files,
-            timeout=60
-        )
-
-        model_response.raise_for_status()
-
-        try:
-            prediction = model_response.json()
-        except ValueError:
-            return jsonify({
-                "error": "Model returned invalid JSON",
-                "raw": model_response.text[:200]
-            }), 500
-
-        animal_name = prediction.get("label", "unknown")
-
-        try:
-            confidence = float(prediction.get("confidence", 0)) * 100
-        except:
-            confidence = 0
-
-        # =========================
-        # STEP 2 — UPLOAD IMAGE TO SUPABASE STORAGE
-        # =========================
-        filename = f"detected_{os.urandom(6).hex()}.jpg"
-
-        supabase.storage.from_("animal-images").upload(
-            filename,
-            image_bytes,
-            {"content-type": "image/jpeg"}
-        )
-
-        public_url = supabase.storage.from_("animal-images").get_public_url(filename)
-
-        # =========================
-        # STEP 3 — INSERT INTO DATABASE
-        # =========================
-        supabase.table("labeled_images").insert({
-            "labeled_image_url": public_url,
-            "animal_detected": animal_name,
-            "confidence_score": confidence
-        }).execute()
-
-        # =========================
-        # RESPONSE
-        # =========================
-        return jsonify({
-            "status": "success",
-            "animal": animal_name,
-            "confidence": confidence,
-            "image_url": public_url
-        }), 200
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-
-# =========================
-# RUN APP
+# RUN SERVER
 # =========================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    print(f"Starting Flask app on port {port}")
     app.run(host="0.0.0.0", port=port)
