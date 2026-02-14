@@ -11,8 +11,8 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# 🔥 CRITICAL CORS FIX
-CORS(app, supports_credentials=True)
+# ✅ CORS for Vercel frontend
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # =========================
 # CONFIG
@@ -21,6 +21,12 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 MODEL_URL = os.getenv("MODEL_URL")
 
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise Exception("Supabase env variables missing")
+
+if not MODEL_URL:
+    raise Exception("MODEL_URL missing")
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # =========================
@@ -28,33 +34,34 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 # =========================
 def background_storage(image_bytes, filename, mimetype, animal, confidence, user_id):
     try:
-        bucket = "labeled-images"
+        bucket = "labeled-images"  # ⚠️ ensure this exists in Supabase
 
+        # Upload image
         supabase.storage.from_(bucket).upload(
             filename,
             image_bytes,
             {"content-type": mimetype}
         )
 
+        # Get public URL
         public_url = supabase.storage.from_(bucket).get_public_url(filename)
 
-        data = {
+        # Insert record
+        supabase.table("labeled_images").insert({
             "labeled_image_url": public_url,
             "animal_detected": animal,
             "confidence_score": confidence,
             "user_id": user_id
-        }
+        }).execute()
 
-        supabase.table("labeled_images").insert(data).execute()
-
-        print("Stored detection:", animal)
+        print("✅ Stored detection:", animal)
 
     except Exception as e:
-        print("Background storage error:", e)
+        print("❌ Background storage error:", e)
 
 
 # =========================
-# 🔥 PREDICT ENDPOINT WITH OPTIONS HANDLING
+# PREDICT ENDPOINT
 # =========================
 @app.route("/predict", methods=["POST", "OPTIONS"])
 def predict():
@@ -72,6 +79,7 @@ def predict():
     user_id = request.form.get("user_id")
 
     try:
+        # Send image to HF Space
         files = {"image": (file.filename, image_bytes, mimetype)}
 
         response = requests.post(
@@ -86,6 +94,7 @@ def predict():
         animal = prediction.get("label", "Unknown")
         confidence = float(prediction.get("confidence", 0)) * 100
 
+        # Start background storage
         filename = f"{int(time.time())}_{file.filename}"
 
         threading.Thread(
@@ -94,12 +103,15 @@ def predict():
             daemon=True
         ).start()
 
+        # 🔥 RETURN ONLY JSON (fixes doctype error)
         return jsonify({
             "status": "success",
             "animal": animal,
             "confidence": confidence
         }), 200
 
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"AI service error: {str(e)}"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -110,6 +122,14 @@ def predict():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "healthy"}), 200
+
+
+# =========================
+# ROOT ROUTE (IMPORTANT)
+# =========================
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"status": "Animal Detection Backend Running"}), 200
 
 
 # =========================
