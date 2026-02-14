@@ -147,6 +147,28 @@ def save_history():
 def health():
     return jsonify({"status": "healthy"}), 200
 
+# =========================
+# HARDWARE UPLOAD ENDPOINT
+# =========================
+@app.route("/hardware-upload", methods=["POST"])
+def hardware_upload():
+
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    file = request.files["image"]
+
+    # Forward image to existing predict logic
+    files = {"image": (file.filename, file.read(), file.mimetype)}
+
+    response = requests.post(
+        f"{request.host_url}predict",
+        files=files
+    )
+
+    return jsonify(response.json()), 200
+
+
 
 # =========================
 # ROOT ROUTE
