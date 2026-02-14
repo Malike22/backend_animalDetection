@@ -34,7 +34,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 # =========================
 def background_storage(image_bytes, filename, mimetype, animal, confidence, user_id):
     try:
-        bucket = "labeled-images"  # ⚠️ ensure this exists in Supabase
+        bucket = "labeled-images"  # ⚠️ must exist in Supabase
 
         # Upload image
         supabase.storage.from_(bucket).upload(
@@ -66,7 +66,7 @@ def background_storage(image_bytes, filename, mimetype, animal, confidence, user
 @app.route("/predict", methods=["POST", "OPTIONS"])
 def predict():
 
-    # 🔥 Handle CORS preflight
+    # Handle CORS preflight
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"}), 200
 
@@ -77,6 +77,10 @@ def predict():
     image_bytes = file.read()
     mimetype = file.mimetype
     user_id = request.form.get("user_id")
+
+    # 🧠 SAFE FALLBACK if user_id missing
+    if not user_id:
+        user_id = "anonymous"
 
     try:
         # Send image to HF Space
@@ -94,8 +98,8 @@ def predict():
         animal = prediction.get("label", "Unknown")
         confidence = float(prediction.get("confidence", 0)) * 100
 
-        # Start background storage
-        filename = f"{int(time.time())}_{file.filename}"
+        # 🔥 FINAL FIX — STORE INSIDE USER FOLDER
+        filename = f"{user_id}/{int(time.time())}_{file.filename}"
 
         threading.Thread(
             target=background_storage,
@@ -103,7 +107,6 @@ def predict():
             daemon=True
         ).start()
 
-        # 🔥 RETURN ONLY JSON (fixes doctype error)
         return jsonify({
             "status": "success",
             "animal": animal,
@@ -125,7 +128,7 @@ def health():
 
 
 # =========================
-# ROOT ROUTE (IMPORTANT)
+# ROOT ROUTE
 # =========================
 @app.route("/", methods=["GET"])
 def root():
