@@ -1,6 +1,8 @@
 import os
 import time
 import requests
+import smtplib
+from email.mime.text import MIMEText
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from supabase import create_client, Client
@@ -20,6 +22,11 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 MODEL_URL = os.getenv("MODEL_URL")
 
+# 📧 EMAIL CONFIG
+ALERT_EMAIL = os.getenv("ALERT_EMAIL")
+ALERT_APP_PASSWORD = os.getenv("ALERT_APP_PASSWORD")
+ALERT_RECEIVER = os.getenv("ALERT_RECEIVER")
+
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
     raise Exception("Supabase env variables missing")
 
@@ -28,7 +35,42 @@ if not MODEL_URL:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-BUCKET_NAME = "captured-images"  # MUST EXIST in Supabase
+BUCKET_NAME = "captured-images"
+
+
+# =========================
+# 🚨 DANGEROUS ANIMAL LIST
+# =========================
+DANGEROUS_ANIMALS = [
+    "bear","bison","boar","coyote","eagle",
+    "elephant","gorilla","hippopotamus","hyena",
+    "leopard","lion","rhinoceros","shark",
+    "snake","tiger","wolf"
+]
+
+
+# =========================
+# 📧 EMAIL FUNCTION
+# =========================
+def send_email_alert(animal, confidence):
+    subject = f"🚨 DANGER ALERT: {animal.upper()} DETECTED"
+    body = f"""
+Dangerous animal detected!
+
+Animal: {animal}
+Confidence: {confidence:.2f}%
+
+Take precautions immediately.
+"""
+
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = ALERT_EMAIL
+    msg["To"] = ALERT_RECEIVER
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(ALERT_EMAIL, ALERT_APP_PASSWORD)
+        server.sendmail(ALERT_EMAIL, ALERT_RECEIVER, msg.as_string())
 
 
 # =========================
@@ -37,7 +79,6 @@ BUCKET_NAME = "captured-images"  # MUST EXIST in Supabase
 @app.route("/predict", methods=["POST", "OPTIONS"])
 def predict():
 
-    # 🔥 Handle CORS preflight
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"}), 200
 
@@ -49,7 +90,6 @@ def predict():
     mimetype = file.mimetype
 
     try:
-        # Send image to HF Space model
         files = {"image": (file.filename, image_bytes, mimetype)}
 
         response = requests.post(
@@ -61,8 +101,12 @@ def predict():
         response.raise_for_status()
         prediction = response.json()
 
-        animal = prediction.get("label", "Unknown")
+        animal = prediction.get("label", "Unknown").lower()
         confidence = float(prediction.get("confidence", 0)) * 100
+
+        # 🚨 SEND EMAIL IF DANGEROUS
+        if animal in DANGEROUS_ANIMALS:
+            send_email_alert(animal, confidence)
 
         return jsonify({
             "status": "success",
@@ -75,7 +119,7 @@ def predict():
 
 
 # =========================
-# SAVE HISTORY (UPLOAD + DB INSERT)
+# SAVE HISTORY (UNCHANGED)
 # =========================
 @app.route("/save-history", methods=["POST"])
 def save_history():
@@ -96,7 +140,6 @@ def save_history():
         mimetype = file.mimetype
         filename = f"{int(time.time())}_{file.filename}"
 
-        # ========= 1️⃣ Upload to Storage =========
         supabase.storage.from_(BUCKET_NAME).upload(
             filename,
             image_bytes,
@@ -105,7 +148,6 @@ def save_history():
 
         public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(filename)
 
-        # ========= 2️⃣ Insert into captured_images =========
         captured_data = {
             "user_id": user_id,
             "image_url": public_url,
@@ -114,12 +156,8 @@ def save_history():
 
         captured_response = supabase.table("captured_images").insert(captured_data).execute()
 
-        if not captured_response.data:
-            return jsonify({"error": "Failed to create captured image record"}), 500
-
         captured_id = captured_response.data[0]["id"]
 
-        # ========= 3️⃣ Insert into labeled_images =========
         label_data = {
             "captured_image_id": captured_id,
             "labeled_image_url": public_url,
@@ -130,25 +168,14 @@ def save_history():
 
         supabase.table("labeled_images").insert(label_data).execute()
 
-        return jsonify({
-            "status": "saved",
-            "image_url": public_url
-        }), 200
+        return jsonify({"status": "saved","image_url": public_url}), 200
 
     except Exception as e:
-        print("Save history error:", e)
         return jsonify({"error": str(e)}), 500
 
 
 # =========================
-# HEALTH CHECK
-# =========================
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "healthy"}), 200
-
-# =========================
-# HARDWARE UPLOAD ENDPOINT
+# HARDWARE UPLOAD (UNCHANGED)
 # =========================
 @app.route("/hardware-upload", methods=["POST"])
 def hardware_upload():
@@ -158,7 +185,6 @@ def hardware_upload():
 
     file = request.files["image"]
 
-    # Forward image to existing predict logic
     files = {"image": (file.filename, file.read(), file.mimetype)}
 
     response = requests.post(
@@ -169,11 +195,18 @@ def hardware_upload():
     return jsonify(response.json()), 200
 
 
+# =========================
+# HEALTH CHECK
+# =========================
+@app.route("/health")
+def health():
+    return jsonify({"status": "healthy"}), 200
+
 
 # =========================
 # ROOT ROUTE
 # =========================
-@app.route("/", methods=["GET"])
+@app.route("/")
 def root():
     return jsonify({"status": "Animal Detection Backend Running"}), 200
 
