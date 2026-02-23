@@ -2,6 +2,7 @@ import os
 import time
 import requests
 import smtplib
+import threading
 from email.mime.text import MIMEText
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -37,7 +38,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 BUCKET_NAME = "captured-images"
 
-
 # =========================
 # 🚨 DANGEROUS ANIMAL LIST
 # =========================
@@ -48,13 +48,13 @@ DANGEROUS_ANIMALS = [
     "snake","tiger","wolf"
 ]
 
-
 # =========================
-# 📧 EMAIL FUNCTION
+# 📧 EMAIL FUNCTION (SAFE)
 # =========================
 def send_email_alert(animal, confidence):
-    subject = f"🚨 DANGER ALERT: {animal.upper()} DETECTED"
-    body = f"""
+    try:
+        subject = f"🚨 DANGER ALERT: {animal.upper()} DETECTED"
+        body = f"""
 Dangerous animal detected!
 
 Animal: {animal}
@@ -63,14 +63,19 @@ Confidence: {confidence:.2f}%
 Take precautions immediately.
 """
 
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = ALERT_EMAIL
-    msg["To"] = ALERT_RECEIVER
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = ALERT_EMAIL
+        msg["To"] = ALERT_RECEIVER
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(ALERT_EMAIL, ALERT_APP_PASSWORD)
-        server.sendmail(ALERT_EMAIL, ALERT_RECEIVER, msg.as_string())
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(ALERT_EMAIL, ALERT_APP_PASSWORD)
+            server.sendmail(ALERT_EMAIL, ALERT_RECEIVER, msg.as_string())
+
+        print("Email alert sent")
+
+    except Exception as e:
+        print("Email failed:", e)
 
 
 # =========================
@@ -104,9 +109,13 @@ def predict():
         animal = prediction.get("label", "Unknown").lower()
         confidence = float(prediction.get("confidence", 0)) * 100
 
-        # 🚨 SEND EMAIL IF DANGEROUS
+        # 🚀 SEND EMAIL IN BACKGROUND (NON-BLOCKING)
         if animal in DANGEROUS_ANIMALS:
-            send_email_alert(animal, confidence)
+            threading.Thread(
+                target=send_email_alert,
+                args=(animal, confidence),
+                daemon=True
+            ).start()
 
         return jsonify({
             "status": "success",
@@ -119,7 +128,7 @@ def predict():
 
 
 # =========================
-# SAVE HISTORY (UNCHANGED)
+# SAVE HISTORY
 # =========================
 @app.route("/save-history", methods=["POST"])
 def save_history():
@@ -155,7 +164,6 @@ def save_history():
         }
 
         captured_response = supabase.table("captured_images").insert(captured_data).execute()
-
         captured_id = captured_response.data[0]["id"]
 
         label_data = {
@@ -168,14 +176,14 @@ def save_history():
 
         supabase.table("labeled_images").insert(label_data).execute()
 
-        return jsonify({"status": "saved","image_url": public_url}), 200
+        return jsonify({"status": "saved", "image_url": public_url}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 # =========================
-# HARDWARE UPLOAD (UNCHANGED)
+# HARDWARE UPLOAD
 # =========================
 @app.route("/hardware-upload", methods=["POST"])
 def hardware_upload():
